@@ -2,7 +2,7 @@
 #include "enums/WorldGenEnums.hpp"
 
 const int roomLayoutProbability[3][4] = {
-    {0, 70, 100, 0}, // UPPER
+    {5, 70, 100, 0}, // UPPER
     {15, 60, 80, 100}, // MIDDLE
     {20, 70, 100, 0}, // LOWER
 };

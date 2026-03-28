@@ -7,6 +7,8 @@
 #include "datatypes/RoomId.hpp"
 #include "datatypes/Coords.hpp"
 #include "RoomNode.hpp"
+#include "Room.hpp"
+#include "Entity.hpp"
 
 constexpr Direction directionLookup[3][3] ={
     {Direction::NORTH_WEST,     Direction::NORTH,       Direction::NORTH_EAST},
@@ -35,15 +37,25 @@ class WorldGen {
         RoomTheme _lowerTheme;
 
         int _greatestDepth = 0;
+        int _numLower = 0;
 
+        void _printWorld();
+
+        void _generateRoomNode(RoomId roomId, RoomId parentId, Coords roomCoords);
         int _generateGrid(int rows, int columns, int roomCount);
+        void _generateRoomsEntities(std::vector<Room>* rooms, std::vector<Entity>* entities);
+
+        void _buildLoops();
+        void _applyTransitional();
+        void _applyTypes();
+
         void _addNeighbors(std::vector<NeighborRoom>* childRooms, 
                 Coords coords, RoomId id);
-        void _printWorld();
-        void _generateRoomNode(RoomId roomId, RoomId parentId, Coords roomCoords);
-        void _differentiateRooms();
-        int _depth(RoomId parentRoomId);
 
-        RoomTheme getMiddleToUpperTheme(RoomTheme middle);
-        RoomTheme getLowerToMiddleTheme(RoomTheme lower);
+        void _init(int rows, int columns);
+        int _depth(RoomId parentRoomId);
+        RoomLayout _getRoomLayout(int exits);
+        bool _checkIntersection(NeighborRoom room);
+        RoomTheme _getMiddleToUpperTheme(RoomTheme middle);
+        RoomTheme _getLowerToMiddleTheme(RoomTheme lower);
 };

@@ -1,4 +1,5 @@
 #include "WorldGen.hpp"
+#include "enums/Direction.hpp"
 #include "enums/WorldGenEnums.hpp"
 #include "WorldGenTables.hpp"
 
@@ -14,13 +15,14 @@ WorldGen::WorldGen(int rows, int columns, int roomCount) {
     int iterations = 0;
 
     // Repeat until satisfactory generation
+    // Room count within threshold, depth within threshold, and number of lower rooms
+    // within threshold
     while ( totalRooms < roomCount || totalRooms > roomCount + ROOM_THRESH ||
-            _greatestDepth < TARGET_DEPTH || _greatestDepth > TARGET_DEPTH + DEPTH_THRESH) {
+            _greatestDepth < TARGET_DEPTH || _greatestDepth > TARGET_DEPTH + DEPTH_THRESH ||
+            _numLower < totalRooms * MIN_LOWER) {
 
         // Initialize empty variables and arrays
-        _greatestDepth = 0;
-        _roomNodes.clear();
-        _roomGrid = std::vector<std::vector<RoomId>>(rows, std::vector<RoomId>(columns, ROOM_ID_NULL));
+        _init(rows, columns);
 
         // Generate random themes
         _upperTheme = upperThemes[_rng() % upperThemes.size()];
@@ -35,15 +37,28 @@ WorldGen::WorldGen(int rows, int columns, int roomCount) {
         iterations++;
     }
 
-    // Now apply types and themes to the rooms
-    _differentiateRooms();
+    // Now apply various properties to the nodes
+    _buildLoops();
+    _applyTransitional();
+    _applyTypes();
 
     _printWorld();
     std::cout << "Iterations: " << iterations << "\n";
-
 }
 
-RoomTheme WorldGen::getLowerToMiddleTheme(RoomTheme lower) {
+// Initialize variables and arrays
+void WorldGen::_init(int rows, int columns) {
+    _greatestDepth = 0;
+    _roomNodes.clear();
+    _roomGrid = std::vector<std::vector<RoomId>>(rows, std::vector<RoomId>(columns, ROOM_ID_NULL));
+    _numLower = 0;
+}
+
+// Generate list of rooms and entities
+void WorldGen::_generateRoomsEntities(std::vector<Room>* rooms, std::vector<Entity>* entities) {
+}
+
+RoomTheme WorldGen::_getLowerToMiddleTheme(RoomTheme lower) {
     switch (lower) {
         case RoomTheme::INFESTED:
             return RoomTheme::DECAYING;
@@ -58,7 +73,7 @@ RoomTheme WorldGen::getLowerToMiddleTheme(RoomTheme lower) {
     }
 }
 
-RoomTheme WorldGen::getMiddleToUpperTheme(RoomTheme middle) {
+RoomTheme WorldGen::_getMiddleToUpperTheme(RoomTheme middle) {
     switch (middle) {
         case RoomTheme::LUSH:
             return RoomTheme::OVERGROWN;
@@ -73,67 +88,93 @@ RoomTheme WorldGen::getMiddleToUpperTheme(RoomTheme middle) {
     }
 }
 
-// Apply types and themes to rooms based on depth, layout, and probabilities
-void WorldGen::_differentiateRooms() {
+RoomLayout WorldGen::_getRoomLayout(int exits) {
+    switch (exits) {
+        case 1:
+            return RoomLayout::TERMINUS;
+        case 2:
+            return RoomLayout::CORRIDOR;
+        case 3:
+            return RoomLayout::JUNCTION;
+        default:
+            return RoomLayout::HUB;
+    }
+}
 
-    // Iterate through room nodes
+// First pass, build loops
+void WorldGen::_buildLoops() {
+    int numLoops = 0;
+
     for (RoomNode& node : _roomNodes) {
 
         // Decide whether to attempt loop
-        if (_rng() % 100 < 50) {
+        // Attempt if guaranteed or based on probability
+        // Don't attempt if too many loops
+        if ((numLoops < LOOP_GUARANTEED || _rng() % 100 < LOOP_PROB) && 
+                !(numLoops > _roomNodes.size() * LOOP_MAX)) {
             std::vector<neighborRoom> neighborRooms;
             _addNeighbors(&neighborRooms, node.roomCoords, node.roomId);
-            
+
             // Find loop candidate amongst neighbors
-            for (NeighborRoom neighbor : neighborRooms) {
+            for (NeighborRoom& neighbor : neighborRooms) {
                 RoomId neighborId = _roomGrid[neighbor.childCoords.X][neighbor.childCoords.Y];
 
                 // Make sure neighbor exists
                 if (neighborId != ROOM_ID_NULL) {
                     RoomNode* neighborNode =  &_roomNodes[neighborId];
 
-                    // Build loop if within 1 level of node and not already hub-sized
-                    if (neighborNode->rootDepth >= node.rootDepth - 1 &&
-                            neighborNode->rootDepth <= node.rootDepth + 1 &&
-                            neighborNode->countExits() < 4) {
+                    // Build loop if 3+ levels away from node, not a junction or hub,
+                    // not an intersecting path, and not between upper and lower
+                    if ((neighborNode->rootDepth <= node.rootDepth - LOOP_THRESH ||
+                                neighborNode->rootDepth >= node.rootDepth + LOOP_THRESH) &&
+                            neighborNode->countExits() < 3 &&
+                            node.countExits() < 3 &&
+                            !_checkIntersection(neighbor) &&
+                            !(node.roomDepth == RoomDepth::UPPER && 
+                                neighborNode->roomDepth == RoomDepth::LOWER) &&
+                            !(node.roomDepth == RoomDepth::LOWER && 
+                                neighborNode->roomDepth == RoomDepth::UPPER)) {
 
                         // Create link
                         neighborNode->setExit(neighbor.directionToParent, node.roomId);
                         node.setExit(neighbor.directionFromParent, neighborId);
+                        numLoops++;
+
                         break;
                     }
                 }
             }
         }
+    }
 
-        // Prune nodes with too few exits
-        switch (node.countExits()) {
-            case 1:
-                node.setRoomLayout(RoomLayout::TERMINUS);
-                break;
-            case 2:
-                node.setRoomLayout(RoomLayout::CORRIDOR);
-                break;
-            case 3:
-                node.setRoomLayout(RoomLayout::JUNCTION);
-                break;
-            case 4:
-                node.setRoomLayout(RoomLayout::HUB);
-                break;
-        }
+}
+
+// Second pass, update layout and apply transitional themes
+void WorldGen::_applyTransitional() {
+    for (RoomNode& node : _roomNodes) {
+
+        // Update node layout
+        node.setRoomLayout(_getRoomLayout(node.countExits()));
 
         // Promote neighboring candidates for transitional themes
         for (RoomId neighborId : node.getExitRoomIds()) {
 
             if (node.roomDepth == RoomDepth::MIDDLE && 
                     _roomNodes[neighborId].roomDepth == RoomDepth::UPPER) { // Middle -> Upper
-                _roomNodes[neighborId].setRoomTheme(getMiddleToUpperTheme(_middleTheme));
+                _roomNodes[neighborId].setRoomTheme(_getMiddleToUpperTheme(_middleTheme));
 
             } else if (node.roomDepth == RoomDepth::LOWER && 
                     _roomNodes[neighborId].roomDepth == RoomDepth::MIDDLE) { // Lower -> Middle
-                _roomNodes[neighborId].setRoomTheme(getLowerToMiddleTheme(_lowerTheme));
+                _roomNodes[neighborId].setRoomTheme(_getLowerToMiddleTheme(_lowerTheme));
             }
         }
+    }
+}
+
+// Third pass, apply type enums to rooms
+void WorldGen::_applyTypes() {
+    for (RoomNode& node : _roomNodes) {
+
     }
 }
 
@@ -202,6 +243,7 @@ void WorldGen::_generateRoomNode(RoomId roomId, RoomId parentId, Coords roomCoor
     } else {
         depth = RoomDepth::LOWER;
         theme = _lowerTheme;
+        _numLower++;
     }
 
     // Set layout based on probabilities and depth
@@ -240,20 +282,22 @@ int WorldGen::_generateGrid(int rows, int columns, int roomCount) {
 
         // Select random empty room and remove from vector
         int roomIndex = _rng() % prospectiveRooms.size();
-        NeighborRoom childRoom = prospectiveRooms[roomIndex];
+        NeighborRoom prospectiveRoom = prospectiveRooms[roomIndex];
 
         prospectiveRooms.erase(prospectiveRooms.begin() + roomIndex);
 
-        // Unpack room balues
-        Coords roomCoords = childRoom.childCoords;
-        RoomId parentId = childRoom.parentId;
-        Direction directionFromParent = childRoom.directionFromParent;
-        Direction directionToParent = childRoom.directionToParent;
+        // Unpack room vnalues
+        Coords roomCoords = prospectiveRoom.childCoords;
+        RoomId parentId = prospectiveRoom.parentId;
+        Direction directionFromParent = prospectiveRoom.directionFromParent;
+        Direction directionToParent = prospectiveRoom.directionToParent;
 
-        // Skip generation if not empty, if parent has too many exits, or if parent is too deep
+        // Skip generation if not empty, if parent has too many exits, if parent is too deep,
+        // or if path would create an intersection with neighbors
         if (_roomGrid[roomCoords.X][roomCoords.Y] != ROOM_ID_NULL || 
                 (parentId > -1 && _roomNodes[parentId].countExits() == _roomNodes[parentId].maxExits()) ||
-                (parentId > -1 && _roomNodes[parentId].rootDepth > TARGET_DEPTH + 3)) {
+                (parentId > -1 && _roomNodes[parentId].rootDepth > TARGET_DEPTH + 3) ||
+                _checkIntersection(prospectiveRoom)) {
             continue;
         }
 
@@ -478,4 +522,45 @@ void WorldGen::_addNeighbors(std::vector<NeighborRoom>* childRooms, Coords coord
             }
         }
     }
+}
+
+// Check for diagonal intersections in a particular direction
+bool WorldGen::_checkIntersection(NeighborRoom room) {
+    int yOffset = 0;
+    Direction neighborExit;
+
+    switch(room.directionToParent) {
+        case Direction::NORTH_WEST:
+            yOffset = -1;
+            neighborExit = Direction::SOUTH_WEST;
+            break;
+        case Direction::SOUTH_WEST:
+            yOffset = 1;
+            neighborExit = Direction::NORTH_WEST;
+            break;
+        case Direction::NORTH_EAST:
+            yOffset = -1;
+            neighborExit = Direction::SOUTH_EAST;
+            break;
+        case Direction::SOUTH_EAST:
+            yOffset = 1;
+            neighborExit = Direction::NORTH_EAST;
+            break;
+        default:
+            return false;
+    }
+
+    Coords neighborCoords = {room.childCoords.X, room.childCoords.Y + yOffset};
+    RoomId neighborId = _roomGrid[neighborCoords.X][neighborCoords.Y];
+
+    if (neighborId > ROOM_ID_NULL) {
+        RoomNode* neighborNode = &_roomNodes[neighborId];
+
+        if (neighborNode->checkExit(neighborExit)) {
+            return true;
+        }
+    }
+
+    return false;
+
 }
